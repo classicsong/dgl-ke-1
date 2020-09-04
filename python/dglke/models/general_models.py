@@ -248,7 +248,7 @@ class KEModel(object):
             self.score_func = RESCALScore(relation_dim, entity_dim)
         elif model_name == 'RotatE':
             self.score_func = RotatEScore(gamma, self.emb_init)
-        
+
         self.model_name = model_name
         self.head_neg_score = self.score_func.create_neg(True)
         self.tail_neg_score = self.score_func.create_neg(False)
@@ -283,7 +283,7 @@ class KEModel(object):
         if self.strict_rel_part or self.soft_rel_part:
             self.global_relation_emb.save(path, dataset+'_'+self.model_name+'_relation')
         else:
-            self.relation_emb.save(path, dataset+'_'+self.model_name+'_relation')   
+            self.relation_emb.save(path, dataset+'_'+self.model_name+'_relation')
 
         self.score_func.save(path, dataset+'_'+self.model_name)
 

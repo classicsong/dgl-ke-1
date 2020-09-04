@@ -22,6 +22,7 @@ import logging
 import time
 
 from .dataloader import EvalDataset, TrainDataset, NewBidirectionalOneShotIterator
+from .dataloader import NewSharedPosOneShotIterator
 from .dataloader import get_dataset
 
 from .utils import get_compatible_batch_size, save_model, CommonArgParser
@@ -42,7 +43,7 @@ class ArgParser(CommonArgParser):
     def __init__(self):
         super(ArgParser, self).__init__()
 
-        self.add_argument('--gpu', type=int, default=[-1], nargs='+', 
+        self.add_argument('--gpu', type=int, default=[-1], nargs='+',
                           help='A list of gpu ids, e.g. 0 1 2 4')
         self.add_argument('--mix_cpu_gpu', action='store_true',
                           help='Training a knowledge graph embedding model with both CPUs and GPUs.'\
@@ -55,17 +56,19 @@ class ArgParser(CommonArgParser):
         self.add_argument('--async_update', action='store_true',
                           help='Allow asynchronous update on node embedding for multi-GPU training.'\
                                   'This overlaps CPU and GPU computation to speed up.')
+        self.add_argument('--self_neg',  action='store_true',
+                          help='Share positive graph as negative graph in the next iteration')
 
 def prepare_save_path(args):
-    if not os.path.exists(args.save_path):	
-        os.mkdir(args.save_path)	
+    if not os.path.exists(args.save_path):
+        os.mkdir(args.save_path)
 
-    folder = '{}_{}_'.format(args.model_name, args.dataset)	
-    n = len([x for x in os.listdir(args.save_path) if x.startswith(folder)])	
-    folder += str(n)	
-    args.save_path = os.path.join(args.save_path, folder)	
+    folder = '{}_{}_'.format(args.model_name, args.dataset)
+    n = len([x for x in os.listdir(args.save_path) if x.startswith(folder)])
+    folder += str(n)
+    args.save_path = os.path.join(args.save_path, folder)
 
-    if not os.path.exists(args.save_path):	
+    if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
 
 def main():
@@ -110,47 +113,73 @@ def main():
     if args.num_proc > 1:
         train_samplers = []
         for i in range(args.num_proc):
-            train_sampler_head = train_data.create_sampler(args.batch_size,
-                                                           args.neg_sample_size,
-                                                           args.neg_sample_size,
-                                                           mode='head',
-                                                           num_workers=args.num_workers,
-                                                           shuffle=True,
-                                                           exclude_positive=False,
-                                                           rank=i)
-            train_sampler_tail = train_data.create_sampler(args.batch_size,
-                                                           args.neg_sample_size,
-                                                           args.neg_sample_size,
-                                                           mode='tail',
-                                                           num_workers=args.num_workers,
-                                                           shuffle=True,
-                                                           exclude_positive=False,
-                                                           rank=i)
-            train_samplers.append(NewBidirectionalOneShotIterator(train_sampler_head, train_sampler_tail,
-                                                                  args.neg_sample_size, args.neg_sample_size,
-                                                                  True, dataset.n_entities))
+            if args.self_neg:
+                train_sampler_head = train_data.create_share_pos_sampler(args.batch_size,
+                                                                        args.neg_sample_size,
+                                                                        num_workers=args.num_workers,
+                                                                        shuffle=True,
+                                                                        rank=i)
+                train_sampler_tail = train_data.create_share_pos_sampler(args.batch_size,
+                                                                        args.neg_sample_size,
+                                                                        num_workers=args.num_workers,
+                                                                        shuffle=True,
+                                                                        rank=i)
+                train_samplers.append(NewSharedPosOneShotIterator(train_sampler_head, train_sampler_tail,
+                                                                args.neg_sample_size, args.neg_sample_size,
+                                                                True, dataset.n_entities))
+            else:
+                train_sampler_head = train_data.create_sampler(args.batch_size,
+                                                            args.neg_sample_size,
+                                                            args.neg_sample_size,
+                                                            mode='head',
+                                                            num_workers=args.num_workers,
+                                                            shuffle=True,
+                                                            exclude_positive=False,
+                                                            rank=i)
+                train_sampler_tail = train_data.create_sampler(args.batch_size,
+                                                            args.neg_sample_size,
+                                                            args.neg_sample_size,
+                                                            mode='tail',
+                                                            num_workers=args.num_workers,
+                                                            shuffle=True,
+                                                            exclude_positive=False,
+                                                            rank=i)
+                train_samplers.append(NewBidirectionalOneShotIterator(train_sampler_head, train_sampler_tail,
+                                                                    args.neg_sample_size, args.neg_sample_size,
+                                                                    True, dataset.n_entities))
 
-        train_sampler = NewBidirectionalOneShotIterator(train_sampler_head, train_sampler_tail,
-                                                        args.neg_sample_size, args.neg_sample_size,
-                                                       True, dataset.n_entities)
+        train_sampler = train_samplers[0] # for num_proc==1
     else: # This is used for debug
-        train_sampler_head = train_data.create_sampler(args.batch_size,
-                                                       args.neg_sample_size,
-                                                       args.neg_sample_size,
-                                                       mode='head',
-                                                       num_workers=args.num_workers,
-                                                       shuffle=True,
-                                                       exclude_positive=False)
-        train_sampler_tail = train_data.create_sampler(args.batch_size,
-                                                       args.neg_sample_size,
-                                                       args.neg_sample_size,
-                                                       mode='tail',
-                                                       num_workers=args.num_workers,
-                                                       shuffle=True,
-                                                       exclude_positive=False)
-        train_sampler = NewBidirectionalOneShotIterator(train_sampler_head, train_sampler_tail,
+        if args.self_neg:
+            train_sampler_head = train_data.create_share_pos_sampler(args.batch_size,
+                                                                    args.neg_sample_size,
+                                                                    num_workers=args.num_workers,
+                                                                    shuffle=True)
+            train_sampler_tail = train_data.create_share_pos_sampler(args.batch_size,
+                                                                    args.neg_sample_size,
+                                                                    num_workers=args.num_workers,
+                                                                    shuffle=True)
+            train_sampler = NewSharedPosOneShotIterator(train_sampler_head, train_sampler_tail,
                                                         args.neg_sample_size, args.neg_sample_size,
                                                         True, dataset.n_entities)
+        else:
+            train_sampler_head = train_data.create_sampler(args.batch_size,
+                                                        args.neg_sample_size,
+                                                        args.neg_sample_size,
+                                                        mode='head',
+                                                        num_workers=args.num_workers,
+                                                        shuffle=True,
+                                                        exclude_positive=False)
+            train_sampler_tail = train_data.create_sampler(args.batch_size,
+                                                        args.neg_sample_size,
+                                                        args.neg_sample_size,
+                                                        mode='tail',
+                                                        num_workers=args.num_workers,
+                                                        shuffle=True,
+                                                        exclude_positive=False)
+            train_sampler = NewBidirectionalOneShotIterator(train_sampler_head, train_sampler_tail,
+                                                            args.neg_sample_size, args.neg_sample_size,
+                                                            True, dataset.n_entities)
 
 
     if args.valid or args.test:
@@ -302,7 +331,7 @@ def main():
             for i in range(args.num_test_proc):
                 log = queue.get()
                 logs = logs + log
-            
+
             for metric in logs[0].keys():
                 metrics[metric] = sum([log[metric] for log in logs]) / len(logs)
             print("-------------- Test result --------------")

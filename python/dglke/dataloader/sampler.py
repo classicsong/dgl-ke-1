@@ -41,7 +41,7 @@ def SoftRelationPartition(edges, n, threshold=0.05):
         if r.size() > threadold
             Evenly divide edges of r into n parts and put into each relation.
         else
-            Find partition with fewest edges, and put edges of r into 
+            Find partition with fewest edges, and put edges of r into
             this partition.
 
     Parameters
@@ -322,6 +322,20 @@ class TrainDataset(object):
 
         self.g = ConstructGraph(triples, dataset.n_entities, args)
 
+    def create_share_pos_sampler(self, batch_size, neg_chunk_size, num_workers=32,
+                                 shuffle=True, rank=0):
+        EdgeSampler = getattr(dgl.contrib.sampling, 'EdgeSampler')
+        return EdgeSampler(self.g,
+                           seed_edges=F.tensor(self.edge_parts[rank]),
+                           batch_size=batch_size,
+                           neg_sample_size=0,
+                           chunk_size=neg_chunk_size,
+                           negative_mode="",
+                           num_workers=num_workers,
+                           shuffle=shuffle,
+                           exclude_positive=False,
+                           return_false_neg=False)
+
     def create_sampler(self, batch_size, neg_sample_size=2, neg_chunk_size=None, mode='head', num_workers=32,
                        shuffle=True, exclude_positive=False, rank=0):
         """Create sampler for training
@@ -523,11 +537,11 @@ class EvalSampler(object):
             pos_g, neg_g = next(self.sampler_iter)
             if self.filter_false_neg:
                 neg_positive = neg_g.edata['false_neg']
-            neg_g = create_neg_subgraph(pos_g, neg_g, 
-                                        self.neg_chunk_size, 
-                                        self.neg_sample_size, 
-                                        'chunk' in self.mode, 
-                                        self.neg_head, 
+            neg_g = create_neg_subgraph(pos_g, neg_g,
+                                        self.neg_chunk_size,
+                                        self.neg_sample_size,
+                                        'chunk' in self.mode,
+                                        self.neg_head,
                                         self.g.number_of_nodes())
             if neg_g is not None:
                 break
@@ -709,4 +723,103 @@ class NewBidirectionalOneShotIterator:
                 pos_g.ndata['id'] = pos_g.parent_nid
                 neg_g.ndata['id'] = neg_g.parent_nid
                 pos_g.edata['id'] = pos_g._parent.edata['tid'][pos_g.parent_eid]
+                yield pos_g, neg_g
+
+class ChunkNegPosEdgeSubgraph(dgl.DGLGraph):
+    """Wrapper for negative graph
+
+        Parameters
+        ----------
+        neg_g : DGLGraph
+            Graph holding negative edges.
+        num_chunks : int
+            Number of chunks in sampled graph.
+        chunk_size : int
+            Info of chunk_size.
+        neg_sample_size : int
+            Info of neg_sample_size.
+        neg_head : bool
+            If True, negative_mode is 'head'
+            If False, negative_mode is 'tail'
+    """
+    def __init__(self, subg, num_chunks, chunk_size,
+                 neg_sample_size, neg_head):
+        super(ChunkNegPosEdgeSubgraph, self).__init__(graph_data=subg,
+                                                      readonly=True,
+                                                      parent=subg._parent)
+        self.ndata['id'] = subg.ndata['id']
+        u, v = subg.all_edges()
+        self.subg = subg
+        self.num_chunks = num_chunks
+        self.chunk_size = chunk_size
+        self.neg_sample_size = neg_sample_size
+        self.neg_head = neg_head
+        self._head_nid = u
+        self._tail_nid = v
+
+    @property
+    def head_nid(self):
+        return self._head_nid
+
+    @property
+    def tail_nid(self):
+        return self._tail_nid
+
+class NewSharedPosOneShotIterator:
+    """Grouped samper iterator
+
+    Parameters
+    ----------
+    dataloader_head : dgl.contrib.sampling.EdgeSampler
+        EdgeSampler in head mode
+    dataloader_tail : dgl.contrib.sampling.EdgeSampler
+        EdgeSampler in tail mode
+    neg_chunk_size : int
+        How many edges in one chunk. We split one batch into chunks.
+    neg_sample_size : int
+        How many negative edges sampled for each node.
+    is_chunked : bool
+        If True, the sampled batch is chunked.
+    num_nodes : int
+        Total number of nodes in the whole graph.
+    """
+    def __init__(self, dataloader_head, dataloader_tail, neg_chunk_size, neg_sample_size,
+                 is_chunked, num_nodes):
+        self.sampler_head = dataloader_head
+        self.sampler_tail = dataloader_tail
+        self.iterator_head = self.one_shot_iterator(dataloader_head, neg_chunk_size,
+                                                    neg_sample_size, is_chunked,
+                                                    True, num_nodes)
+        self.iterator_tail = self.one_shot_iterator(dataloader_tail, neg_chunk_size,
+                                                    neg_sample_size, is_chunked,
+                                                    False, num_nodes)
+        self.step = 0
+
+    def __next__(self):
+        self.step += 1
+        if self.step % 2 == 0:
+            pos_g, neg_g = next(self.iterator_head)
+        else:
+            pos_g, neg_g = next(self.iterator_tail)
+        return pos_g, neg_g
+
+    @staticmethod
+    def one_shot_iterator(dataloader, neg_chunk_size, neg_sample_size, is_chunked,
+                          neg_head, num_nodes):
+        last_pos_g = None
+        while True:
+            for pos_g in dataloader:
+                pos_g.ndata['id'] = pos_g.parent_nid
+                pos_g.edata['id'] = pos_g._parent.edata['tid'][pos_g.parent_eid]
+                if last_pos_g is None:
+                    last_pos_g = pos_g
+                    continue
+                if pos_g.number_of_edges() % neg_chunk_size > 0:
+                    continue
+                else:
+                    num_chunks = int(pos_g.number_of_edges() / neg_chunk_size)
+                    neg_g = ChunkNegPosEdgeSubgraph(last_pos_g, num_chunks, neg_chunk_size,
+                                                    neg_sample_size, neg_head)
+
+                last_pos_g = pos_g
                 yield pos_g, neg_g

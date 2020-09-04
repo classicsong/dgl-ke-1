@@ -284,7 +284,7 @@ def dist_train_test(args, model, train_sampler, entity_pb, relation_pb, l2g, ran
         relation_id = F.arange(0, model_test.n_relations)
         relation_data = client.pull(name='relation_emb', id_tensor=relation_id)
         model_test.relation_emb.emb[relation_id] = relation_data
- 
+
         print("Pull entity_emb ... ")
         # split model into 100 small parts
         start = 0
@@ -304,7 +304,7 @@ def dist_train_test(args, model, train_sampler, entity_pb, relation_pb, l2g, ran
             start = end
             end += count
             percent += 1
-    
+
         if not args.no_save_emb:
             print("save model to %s ..." % args.save_path)
             save_model(args, model_test)
@@ -357,7 +357,7 @@ def dist_train_test(args, model, train_sampler, entity_pb, relation_pb, l2g, ran
             for i in range(args.num_test_proc):
                 log = queue.get()
                 logs = logs + log
-            
+
             for metric in logs[0].keys():
                 metrics[metric] = sum([log[metric] for log in logs]) / len(logs)
 
